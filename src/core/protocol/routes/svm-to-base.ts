@@ -19,6 +19,8 @@ import type {
   MonitorOptions,
   ProveOptions,
   ProveResult,
+  Quote,
+  QuoteRequest,
   RouteAdapter,
   RouteCapabilities,
   StatusOptions,
@@ -31,6 +33,28 @@ import { BaseEngine } from "../engines/base-engine";
 import type { EngineConfig } from "../engines/types";
 import { BRIDGE_ABI } from "../../../interfaces/abis/bridge.abi";
 import { buildEvmIncomingMessage } from "../identity";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fee estimation constants for SVM -> Base quotes
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Solana base transaction fee in lamports */
+const SOLANA_BASE_TX_FEE = 5_000n;
+/** Additional compute unit buffer for bridge operations */
+const SOLANA_COMPUTE_UNIT_BUFFER = 10_000n;
+/** Default gas limit when not specified */
+const DEFAULT_GAS_LIMIT = 100_000n;
+/** Base gas cost for token transfer on Base (without call) */
+const BASE_TOKEN_TRANSFER_GAS = 65_000n;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Timing estimates for SVM -> Base (in milliseconds)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Minimum expected time: Solana finality (~400ms) + validator (~30s) + Base (~2s) */
+const MIN_TIME_MS = 30_000;
+/** Maximum expected time: conservative estimate with delays */
+const MAX_TIME_MS = 120_000;
 
 /**
  * SVM -> Base route adapter
@@ -93,7 +117,105 @@ export class SvmToBaseRouteAdapter implements RouteAdapter {
       autoRelay: true,
       manualExecute: this.evm.hasSigner,
       prove: false,
+      supportsQuote: true,
     };
+  }
+
+  async quote(req: QuoteRequest): Promise<Quote> {
+    const gasLimit = req.relay?.gasLimit ?? DEFAULT_GAS_LIMIT;
+    const relayMode = req.relay?.mode ?? "auto";
+    const warnings: string[] = [];
+
+    // Fetch on-chain config for fee estimation
+    const { relayerGasConfig } = await this.solanaEngine.getGasConfigs();
+
+    // Estimate source chain fees (Solana transaction fees)
+    const sourceGasFee = SOLANA_BASE_TX_FEE + SOLANA_COMPUTE_UNIT_BUFFER;
+
+    // Calculate relay fee if auto-relay is requested
+    let relayFee: bigint | undefined;
+    if (relayMode === "auto") {
+      // Relay fee calculation: (gasLimit * gasCostScaler) / gasCostScalerDp
+      // This converts EVM gas to lamports based on current pricing
+      relayFee =
+        (gasLimit * relayerGasConfig.gasCostScaler) /
+        relayerGasConfig.gasCostScalerDp;
+
+      // Validate gas limit is within allowed bounds
+      if (gasLimit < relayerGasConfig.minGasLimitPerMessage) {
+        warnings.push(
+          `Gas limit ${gasLimit} is below minimum ${relayerGasConfig.minGasLimitPerMessage}`
+        );
+      }
+      if (gasLimit > relayerGasConfig.maxGasLimitPerMessage) {
+        warnings.push(
+          `Gas limit ${gasLimit} exceeds maximum ${relayerGasConfig.maxGasLimitPerMessage}`
+        );
+      }
+    }
+
+    // Estimate destination chain fees (Base execution)
+    // For SVM -> Base, the relayer pays the destination gas
+    // Users only pay the relay fee upfront on Solana
+    let destinationGas: bigint | undefined;
+    if (req.action.kind === "call") {
+      const evmCall = this.extractEvmCall(req.action.call);
+      try {
+        destinationGas = await this.baseEngine.estimateGasForCall({
+          to: evmCall.to,
+          value: evmCall.value,
+          data: evmCall.data,
+        });
+      } catch (err) {
+        // Gas estimation may fail if call would revert, use default
+        destinationGas = gasLimit;
+        warnings.push(
+          `Destination gas estimation failed: ${err instanceof Error ? err.message : String(err)}. Using provided limit.`
+        );
+      }
+    } else if (req.action.kind === "transfer") {
+      // Transfer operations have predictable gas costs on Base
+      destinationGas = req.action.call ? gasLimit : BASE_TOKEN_TRANSFER_GAS;
+    }
+
+    const estimatedTimeMs = {
+      min: MIN_TIME_MS,
+      max: MAX_TIME_MS,
+    };
+
+    const quote: Quote = {
+      route: req.route,
+      estimatedFees: {
+        source: {
+          amount: sourceGasFee + (relayFee ?? 0n),
+          token: "SOL",
+        },
+      },
+      estimatedTimeMs,
+    };
+
+    // Add destination fee info (informational - paid by relayer)
+    if (destinationGas !== undefined) {
+      quote.estimatedFees.destination = {
+        amount: destinationGas,
+        token: "ETH",
+        note: "paid by relayer",
+      };
+    }
+
+    // Add relay fee breakdown if applicable
+    if (relayMode === "auto" && relayFee !== undefined) {
+      quote.estimatedFees.relay = {
+        amount: relayFee,
+        token: "SOL",
+      };
+    }
+
+    if (warnings.length > 0) {
+      quote.warnings = warnings;
+    }
+
+    return quote;
   }
 
   async initiate(req: BridgeRequest): Promise<BridgeOperation> {

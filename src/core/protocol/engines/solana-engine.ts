@@ -32,11 +32,13 @@ import {
   appendTransactionMessageInstructions,
   assertIsSendableTransaction,
   assertIsTransactionWithBlockhashLifetime,
+  compileTransaction,
   createKeyPairFromBytes,
   createSignerFromKeyPair,
   createSolanaRpc,
   createSolanaRpcSubscriptions,
   createTransactionMessage,
+  getBase64EncodedWireTransaction,
   getProgramDerivedAddress,
   getSignatureFromTransaction,
   pipe,
@@ -162,6 +164,121 @@ export class SolanaEngine {
     }
 
     return await fetchOutgoingMessage(rpc, pubkey);
+  }
+
+  /**
+   * Fetches gas configuration from both bridge and relayer programs.
+   * Used for quote estimation.
+   */
+  async getGasConfigs(): Promise<{
+    bridgeGasConfig: {
+      gasCostScaler: bigint;
+      gasCostScalerDp: bigint;
+      gasPerCall: bigint;
+    };
+    relayerGasConfig: {
+      minGasLimitPerMessage: bigint;
+      maxGasLimitPerMessage: bigint;
+      gasCostScaler: bigint;
+      gasCostScalerDp: bigint;
+    };
+  }> {
+    const rpc = createSolanaRpc(this.config.solana.rpcUrl);
+
+    const [bridgeAddress] = await getProgramDerivedAddress({
+      programAddress: this.config.solana.bridgeProgram,
+      seeds: [Buffer.from(getIdlConstant("BRIDGE_SEED"))],
+    });
+
+    const [cfgAddress] = await getProgramDerivedAddress({
+      programAddress: this.config.solana.relayerProgram,
+      seeds: [Buffer.from(getRelayerIdlConstant("CFG_SEED"))],
+    });
+
+    const [bridge, cfg] = await Promise.all([
+      fetchBridge(rpc, bridgeAddress),
+      fetchCfg(rpc, cfgAddress),
+    ]);
+
+    return {
+      bridgeGasConfig: {
+        gasCostScaler: bridge.data.gasConfig.gasCostScaler,
+        gasCostScalerDp: bridge.data.gasConfig.gasCostScalerDp,
+        gasPerCall: bridge.data.gasConfig.gasPerCall,
+      },
+      relayerGasConfig: {
+        minGasLimitPerMessage: cfg.data.gasConfig.minGasLimitPerMessage,
+        maxGasLimitPerMessage: cfg.data.gasConfig.maxGasLimitPerMessage,
+        gasCostScaler: cfg.data.gasConfig.gasCostScaler,
+        gasCostScalerDp: cfg.data.gasConfig.gasCostScalerDp,
+      },
+    };
+  }
+
+  /**
+   * Simulates a list of instructions to estimate compute units consumed.
+   * This is useful for quote estimation to get accurate fee predictions.
+   *
+   * Note: This simulates the instructions in isolation, not wrapped in the
+   * bridge execute context. The actual execute will have additional overhead
+   * from the bridge program's CPI calls.
+   *
+   * @param instructions - The Solana instructions to simulate
+   * @returns The compute units consumed, or undefined if simulation fails
+   */
+  async simulateInstructions(
+    instructions: Instruction[]
+  ): Promise<bigint | undefined> {
+    if (instructions.length === 0) {
+      return 0n;
+    }
+
+    const rpc = createSolanaRpc(this.config.solana.rpcUrl);
+
+    // Get a recent blockhash for the transaction
+    const { value: latestBlockhash } = await rpc
+      .getLatestBlockhash({ commitment: "confirmed" })
+      .send();
+
+    // We need a fee payer for simulation - use the bridge program as a dummy
+    // since we're using replaceRecentBlockhash which skips signature verification
+    const feePayer = this.config.solana.bridgeProgram;
+
+    // Build the transaction message
+    const txMessage = pipe(
+      createTransactionMessage({ version: 0 }),
+      (msg) => setTransactionMessageFeePayer(feePayer, msg),
+      (msg) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, msg),
+      (msg) => appendTransactionMessageInstructions(instructions, msg)
+    );
+
+    // Compile to transaction (unsigned)
+    const compiledTx = compileTransaction(txMessage);
+
+    // Serialize to base64 wire format
+    const base64Tx = getBase64EncodedWireTransaction(compiledTx);
+
+    try {
+      // Simulate with replaceRecentBlockhash to avoid signature verification
+      const result = await rpc
+        .simulateTransaction(base64Tx, {
+          encoding: "base64",
+          replaceRecentBlockhash: true,
+          commitment: "confirmed",
+        })
+        .send();
+
+      if (result.value.err) {
+        // Simulation failed (e.g., instruction would revert)
+        // Return undefined to indicate we couldn't get an accurate estimate
+        return undefined;
+      }
+
+      return result.value.unitsConsumed;
+    } catch {
+      // RPC error or other failure
+      return undefined;
+    }
   }
 
   async bridgeSol(opts: BridgeSolOpts): Promise<SolAddress> {
