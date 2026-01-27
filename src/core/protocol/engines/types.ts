@@ -3,7 +3,7 @@ import type {
   BridgeBaseToSolanaStateIncomingMessageTransfer,
   CallType,
 } from "../../../clients/ts/src/bridge";
-import type { Address, createSolanaRpc } from "@solana/kit";
+import type { Address, createSolanaRpc, KeyPairSigner } from "@solana/kit";
 import type { Chain, Address as EvmAddress, Hex } from "viem";
 
 export interface BaseConfig {
@@ -22,7 +22,8 @@ export interface CallParams {
 
 export interface SolanaConfig {
   rpcUrl: string;
-  payerKp: string;
+  /** Pre-loaded KeyPairSigner for transaction signing */
+  payer: KeyPairSigner;
   bridgeProgram: Address;
   relayerProgram: Address;
 }
