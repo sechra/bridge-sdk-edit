@@ -2,8 +2,48 @@ import { isAllowedTransition, isTerminalStatus } from "../capabilities";
 import { BridgeInvariantViolationError, BridgeTimeoutError } from "../errors";
 import type { ExecutionStatus, MonitorOptions } from "../types";
 
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      promise.catch(() => {});
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      promise.catch(() => {});
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      }
+    );
+  });
 }
 
 function stableStatusKey(s: ExecutionStatus): string {
@@ -38,11 +78,14 @@ function stableStatusKey(s: ExecutionStatus): string {
  * subscription/indexer implementation.
  */
 export async function* pollingMonitor(
-  getStatus: () => Promise<ExecutionStatus>,
+  getStatus: (signal?: AbortSignal) => Promise<ExecutionStatus>,
   opts: MonitorOptions = {}
 ): AsyncIterable<ExecutionStatus> {
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const pollIntervalMs = opts.pollIntervalMs ?? 5_000;
+  const signal = opts.signal;
+
+  signal?.throwIfAborted();
 
   const start = Date.now();
 
@@ -56,7 +99,9 @@ export async function* pollingMonitor(
       });
     }
 
-    const next = await getStatus();
+    signal?.throwIfAborted();
+
+    const next = await raceAbort(getStatus(signal), signal);
 
     if (prev && !isAllowedTransition(prev.type, next.type)) {
       throw new BridgeInvariantViolationError(
@@ -76,6 +121,6 @@ export async function* pollingMonitor(
       return;
     }
 
-    await sleep(pollIntervalMs);
+    await sleep(pollIntervalMs, signal);
   }
 }
