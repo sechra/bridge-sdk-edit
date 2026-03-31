@@ -1,4 +1,4 @@
-import type { BridgeRoute, ChainId } from "./types";
+import type { BridgeRoute, ChainId } from "./type";
 
 /**
  * Core error base class.
