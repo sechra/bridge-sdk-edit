@@ -17,7 +17,7 @@ function makeViemChain(chainId: number): Chain {
   return {
     id: chainId,
     name: `eip155:${chainId}`,
-    nativeCurrency: { name: "Native", symbol: "NATIVE", decimals: 18 },
+    nativeCurrency: { name: "Custom", symbol: "NATIVE", decimals: 18 },
     rpcUrls: { default: { http: [""] } },
   } as const as Chain;
 }
