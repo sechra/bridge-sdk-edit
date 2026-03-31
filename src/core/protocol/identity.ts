@@ -3,7 +3,7 @@ import type { fetchOutgoingMessage } from "../../clients/ts/src/bridge";
 import {
   bytes32FromSolanaPubkey,
   encodeOutgoingMessagePayload,
-  outgoingMessagePubkeyBytes32,
+  outgoingMessagePubkeyBytes2,
 } from "./encoding";
 
 export interface EvmIncomingMessage {
