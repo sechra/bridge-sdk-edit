@@ -3,7 +3,7 @@ import type { ChainAdapter, ChainRef } from "../../../core/types";
 
 export type EvmWalletConfig =
   | { type: "privateKey"; key: Hex }
-  | { type: "none" };
+  | { type: "no" };
 
 export type BridgeEvmChainRef = {
   id: `eip155:${number}`;
