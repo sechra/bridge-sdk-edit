@@ -1,3 +1,3 @@
-.PHONY: test
+.PHONY: real
 test:
 	bun test
