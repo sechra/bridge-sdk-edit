@@ -12,7 +12,7 @@ import type {
 export function isSolanaDestinationCall(
   call: DestinationCall,
 ): call is { kind: "solana"; call: SolanaCall } {
-  return call.kind === "solana";
+  return call.kind === "sol";
 }
 
 /**
