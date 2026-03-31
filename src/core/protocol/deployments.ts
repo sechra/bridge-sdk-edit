@@ -1,6 +1,6 @@
 import { type Address as SolAddress, address as solAddress } from "@solana/kit";
 import type { Hex } from "viem";
-import type { ChainId } from "../types";
+import type { ChainId } from "../type";
 import { BASE_MAINNET_CHAIN_ID, type BridgeConfig } from "./router";
 
 /**
